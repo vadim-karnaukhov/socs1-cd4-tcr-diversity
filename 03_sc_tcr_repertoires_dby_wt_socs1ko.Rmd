@@ -1,0 +1,195 @@
+---
+title: "Analysis of single-cell TCR repertoires (WT, WT-in-SOCS1 and SOCS1-KO)"
+author: Vadim Karnaukhov
+output: html_document
+date: "2026-07-18"
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(ggbeeswarm)
+
+source(here::here("R", "plotting_functions.R"))
+```
+
+```{r}
+tcr_repertoires_dby_sc <- fread("data/tcr_repertoires_dby_sc.tsv") %>% 
+  mutate(repertoire_group = factor(repertoire_group, levels = c("WT", "WT-in-SOCS1", "SOCS1-KO"))) 
+```
+
+```{r, fig.width=2.2, fig.height = 2.2}
+fig_3k <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO")) %>% 
+  ggplot(aes(x = rank, y = freq, color = repertoire_group, group = mouse_id)) +
+  plot_rank_freq +
+  scale_color_manual(values = c("#1F77B4", "#D62728"))
+
+#png("figures/fig_3k.png", width = 2.1, height = 2.1, units = "in", res = 500)
+fig_3k
+#dev.off()
+```
+
+```{r, fig.width=1.8, fig.height=2.1}
+fig_3l <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO"),
+         rank == 1) %>% 
+  ggplot(aes(x = repertoire_group, y = freq, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Frequency of most expanded clone") +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = .95, label.x = 1.2, method = "wilcox.test") +
+  ggtitle("Experimental data")
+
+#png("figures/fig_3l.png", width = 1.8, height = 2.1, units = "in", res = 500)
+fig_3l
+#dev.off()
+```
+
+```{r, fig.width=1.6, fig.height=2.1}
+fig_s5b <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO"),
+         freq > .01) %>% 
+  group_by(repertoire_group, mouse_id) %>% 
+  summarise(n_expanded = n()) %>% 
+  ggplot(aes(x = repertoire_group, y = n_expanded, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Number of expanded clones") +
+  coord_cartesian(ylim = c(0, 32)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = 31, label.x = 1.3, method = "wilcox.test")
+
+#png("figures/fig_s5b.png", width = 1.6, height = 2.1, units = "in", res = 500)
+fig_s5b
+#dev.off()
+```
+
+```{r, fig.width=1.6, fig.height=2.1}
+fig_s5c <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO")) %>% 
+  group_by(repertoire_group, mouse_id) %>% 
+  summarise(inverse_simpson = 1 / sum(freq^2, na.rm = TRUE), .groups = "drop") %>% 
+  ggplot(aes(x = repertoire_group, y = inverse_simpson, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Inverse Simpson index") +
+  coord_cartesian(ylim = c(0, 25)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = 24, label.x = 1.3, method = "wilcox.test")
+
+#png("figures/fig_s5c.png", width = 1.6, height = 2.1, units = "in", res = 500)
+fig_s5c
+#dev.off()
+```
+
+```{r, fig.width=2.4, fig.height=2.1}
+fig_s5d <- tcr_repertoires_dby_sc %>% 
+  group_by(repertoire_group, mouse_id) %>% 
+  summarise(total_clones = n()) %>% 
+  ggplot(aes(x = repertoire_group, y = total_clones, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Number of detected clones") +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label)
+
+#png("figures/fig_s5d.png", width = 2.4, height = 2.1, units = "in", res = 500)
+fig_s5d
+#dev.off()
+```
+
+# Downsampling to match the distribution of detected clone numbers across groups
+
+```{r}
+total_clones_socs1ko <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group == "SOCS1-KO") %>% 
+  group_by(mouse_id) %>% 
+  summarise(total_clones = n()) %>% 
+  .$total_clones
+
+mouse_id_wt <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group == "WT") %>% 
+  .$mouse_id %>% unique()
+
+set.seed(1)
+
+downsampling_clones <- lapply(mouse_id_wt, function(m) {
+  
+  df <- tcr_repertoires_dby_sc %>% 
+    filter(repertoire_group == "WT", mouse_id == m)
+  
+  lapply(total_clones_socs1ko, function(s) {
+    
+    if (s > nrow(df)) return(NULL)
+    
+    lapply(seq_len(100), function(x) {
+      
+      df %>% 
+        slice_sample(n = s) %>%
+        arrange(desc(n_cells)) %>% 
+        mutate(
+          rank.plot = row_number(),
+          freq = n_cells / sum(n_cells),
+          sim = x,
+          sampled_n_clones = n(),
+          mouse_id = m
+        ) %>% 
+        select(mouse_id, rank.plot, freq, sim, sampled_n_clones
+        )
+    }) %>% 
+      rbindlist()
+  }) %>% 
+    rbindlist()
+}) %>% 
+  rbindlist()
+```
+
+```{r, fig.width=1.8, fig.height=2.4}
+downsampling_clones.wt_median <- downsampling_clones %>% 
+  filter(rank.plot == 1) %>% 
+  group_by(mouse_id, sampled_n_clones) %>% 
+  summarise(mean_freq_top1_mouse = mean(freq)) %>% 
+  group_by(sampled_n_clones) %>% 
+  summarise(median_freq_top1 = median(mean_freq_top1_mouse))
+
+fig_s5g <- downsampling_clones.wt_median %>% 
+  mutate(repertoire_group = "WT") %>% 
+  select(repertoire_group, total_clones = sampled_n_clones, freq_top1 = median_freq_top1) %>% 
+  rbind(tcr_repertoires_dby_sc %>% 
+          filter(repertoire_group == "SOCS1-KO") %>% 
+          group_by(repertoire_group, mouse_id) %>% 
+          summarise(freq_top1 = max(freq),
+                    total_clones = n()) %>% 
+          select(repertoire_group, total_clones, freq_top1)) %>% 
+  mutate(repertoire_group = factor(repertoire_group, levels = c("WT", "SOCS1-KO"))) %>% 
+  ggplot(aes(x = repertoire_group, y = freq_top1, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Frequency of most expanded clone") +
+  coord_cartesian(ylim = c(0, 1.02)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = .99, label.x = 1.3, method = "wilcox.test") +
+  ggtitle("Downsampling \nto match the distribution \nof detected clone numbers")
+
+#png("figures/fig_s5g.png", width = 1.8, height = 2.4, units = "in", res = 500)
+fig_s5g
+#dev.off()
+```
+

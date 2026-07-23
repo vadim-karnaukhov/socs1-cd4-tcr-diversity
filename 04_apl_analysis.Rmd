@@ -1,0 +1,596 @@
+---
+title: "Analysis of TCR-APL screening and APL recall experiments"
+author: Vadim Karnaukhov
+output: html_document
+date: "2026-07-18"
+---
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(magrittr)
+library(ggseqlogo)
+library(cowplot)
+
+source(here::here("R", "plotting_functions.R"))
+```
+
+
+```{r}
+tcr_metadata <- fread("data/tcr_metadata.tsv")
+apl_metadata <- fread("data/apl_metadata.tsv")
+
+tcr_levels <- tcr_metadata$tcr_id
+apl_levels <- c("Dby", apl_metadata$apl_id)
+
+tcr_apl_scan <- fread("data/tcr_apl_scan.tsv") %>% 
+  mutate(tcr_id = factor(tcr_id, levels = tcr_levels),
+         apl_id = factor(apl_id, levels = apl_levels),
+         activation_pct_raw = round(activation_pct_raw, 1),
+         activation_pct = ifelse(activation_pct_raw < 10, 0, activation_pct_raw),
+         recognized_15pct = activation_pct > 15)
+```
+
+## Distribution of TCR promiscuity values
+
+```{r, fig.width=2.5, fig.height=1.7}
+tcr_promiscuity <- tcr_apl_scan %>% 
+  filter(apl_id != "Dby") %>% 
+  group_by(tcr_id) %>% 
+  summarise(n_recognized = sum(recognized_15pct))
+```
+
+
+```{r, fig.width=2.5, fig.height=1.7}
+fig_s7c <- tcr_promiscuity %>% 
+  group_by(n_recognized) %>% 
+  summarise(n_tcr = n()) %>% 
+  ggplot(aes(x = n_recognized, y = n_tcr)) +
+  geom_bar(stat = "identity", fill = "grey50", color = "black", linewidth = 0.15, width = 0.9) +
+  theme_paper +
+  xlab("TCR promiscuity \n(number of recognized APLs)") + ylab("Number of TCRs") +
+  scale_y_continuous(breaks = c(seq(0, 10, 2))) +
+  scale_x_continuous(breaks = c(seq(0, 25, 5)))
+
+#png("figures/fig_s7c.png", width = 2.5, height = 1.7, units = "in", res = 500)
+fig_s7c
+#dev.off()
+```
+
+```{r, fig.width=2.8, fig.height=2.1}
+avidity_dby <- tcr_apl_scan %>% 
+  filter(apl_id == "Dby") %>% 
+  select(tcr_id, activation_pct_Dby = activation_pct) %>% 
+  merge(fread("data/tcr_avidities.tsv")) %>% 
+  mutate(repertoire_group = ifelse(substr(tcr_id, 1, 1) == "M", "WT", "SOCS1-KO"),
+         repertoire_group = factor(repertoire_group, levels = c("WT", "SOCS1-KO")))
+
+avidity_dby.cor_test <- cor.test(avidity_dby$activation_pct_Dby, avidity_dby$`F-av`, method = "spearman", exact = FALSE)
+
+avidity_dby.cor_label <- paste0(
+  "rho == ", sprintf("%.2f", unname(avidity_dby.cor_test$estimate)),
+  "*','~",
+  p_math(avidity_dby.cor_test$p.value, digits = 2)
+)
+
+fig_s7b <- avidity_dby %>% 
+  ggplot(aes(x = activation_pct_Dby, y = `F-av`)) +
+  geom_point(aes(fill = repertoire_group), shape = 21, stroke = 0.25) +
+  geom_smooth(method = "lm", color = "black", se = F) +
+  scale_y_log10(breaks = 10^seq(-7, -3, by = 1), labels = scales::trans_format("log10", scales::math_format(10^.x)), minor_breaks = NULL) +
+  labs(x = expression("Activation by Dby (%NFAT-GFP"^"+"*")"), y = "F-av, M") +
+  annotate("label", x = 3, y = 5e-04, label = avidity_dby.cor_label, parse = TRUE, hjust = 0, vjust = .5, size = 8 / .pt, label.size = 0, fill = "white") +
+  theme_paper +
+  scale_fill_mouse_type() +
+  theme(
+    legend.position = c(1, 0.88),
+    legend.justification = c(1, 0),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    #legend.text = element_text(size = 6.5),
+    legend.key.size = unit(3, "mm"),
+    legend.spacing.y = unit(0.2, "mm"),
+    legend.margin = margin(0, 0, 0, 0)
+  )
+
+#png("figures/fig_s7b.png", width = 2.8, height = 2.1, units = "in", res = 500)
+fig_s7b
+#dev.off()
+```
+
+
+# Recognition of individual APLs 
+
+```{r, fig.width=8, fig.height=2.5}
+fig_s7d_1 <- tcr_apl_scan %>% 
+  group_by(apl_id) %>% 
+  summarise(activation_pct.max = max(activation_pct)) %>% 
+  merge(apl_metadata %>% 
+          select(apl_id, mut_pos) %>% 
+          rbind(tibble(apl_id = "Dby", mut_pos = "NA"))) %>% 
+  mutate(mut_pos = factor(mut_pos, levels = c("NA", "5", "6", "8", "10", "11"))) %>% 
+  ggplot(aes(x = apl_id, y = activation_pct.max, fill = factor(mut_pos))) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.15, width = 0.9) +
+  geom_hline(yintercept = 15, linetype = "dashed") +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+        legend.position = "right") +
+  xlab("APL") + ylab("Maximal activation\n(% NFAT-GFP+)") +
+  scale_fill_manual("Mutation\nposition", values = scales::hue_pal()(6)[c(6,1,5,3,4,2)])
+
+#png("figures/fig_s7d_1.png", width = 8, height = 2.5, units = "in", res = 1000)
+fig_s7d_1
+#dev.off()
+```
+
+```{r, fig.width=8, fig.height=2.5}
+fig_s7d_2 <- tcr_apl_scan %>% 
+  group_by(apl_id) %>% 
+  summarise(n_tcr = sum(recognized_15pct)) %>% 
+  merge(apl_metadata %>% 
+          select(apl_id, mut_pos) %>% 
+          rbind(tibble(apl_id = "Dby", mut_pos = "NA"))) %>% 
+  mutate(mut_pos = factor(mut_pos, levels = c("NA", "5", "6", "8", "10", "11"))) %>% 
+  ggplot(aes(x = apl_id, y = n_tcr, fill = factor(mut_pos))) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.15, width = 0.9) +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+        legend.position = "right") +
+  xlab("APL") + ylab("Number of recognizing TCRs") +
+  scale_fill_manual("Mutation\nposition", values = scales::hue_pal()(6)[c(6,1,5,3,4,2)])
+
+#png("figures/fig_s7d_2.png", width = 8, height = 2.5, units = "in", res = 1000)
+fig_s7d_2
+#dev.off()
+```
+
+# Defining APL recognition groups for TCRs
+
+```{r}
+tcr_apl_recognition_cluster <- tcr_apl_scan %>% 
+  dcast(tcr_id ~ apl_id, value.var = "recognized_15pct") %>% 
+  column_to_rownames("tcr_id") %>% 
+  dist(method = "euclidean") %>% 
+  hclust(method = "ward.D2") %>% 
+  cutree(k = 4) %>% 
+  as.data.frame() %>% 
+  set_colnames("apl_recognition_cluster") %>% 
+  rownames_to_column("tcr_id") %>% 
+  mutate(apl_recognition_cluster = c("1" = "C1", "2" = "C3", "3" = "C2", "4" = "C4")[as.character(apl_recognition_cluster)])
+```
+
+```{r, fig.width=8, fig.height=3}
+fig_s8_1 <- tcr_apl_scan %>% 
+  merge(tcr_apl_recognition_cluster) %>% 
+  group_by(apl_recognition_cluster, apl_id) %>% 
+  summarise(activation_pct.mean = mean(activation_pct)) %>% 
+  ggplot(aes(x = apl_id, y = apl_recognition_cluster, fill = activation_pct.mean)) +
+  geom_tile() +
+  scale_fill_continuous("Mean activation\n(% NFAT-GFP+)", type = "viridis",
+                        guide = guide_colorbar(direction = "horizontal", barwidth = unit(5.2, "cm"),
+                                               barheight = unit(0.22, "cm"), title.position = "left")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+        axis.text.y = element_text(angle = 0, hjust = 1, size = 8),
+        legend.position = "bottom",
+        legend.box.spacing = unit(.9, "cm"),
+        legend.margin = margin(t = -8, b = 0),
+        legend.box.margin = margin(t = -12, b = 0)) +
+  scale_y_discrete(limits = rev) +
+  ylab("Unsupervised cluster") + xlab("APL") 
+
+fig_s8_1
+```
+
+```{r}
+df.for_logo.clusters <- rbind(
+  tcr_metadata %>% mutate(chain = "a") %>% select(tcr_id, cdr3 = CDR3a, chain),
+  tcr_metadata %>% mutate(chain = "b") %>% select(tcr_id, cdr3 = CDR3b, chain)) %>% 
+  merge(tcr_apl_recognition_cluster) %>% 
+  mutate(cdr3.len = nchar(cdr3)) %>% 
+  group_by(apl_recognition_cluster, chain, cdr3.len) %>% 
+  mutate(n = n()) %>% 
+  group_by(apl_recognition_cluster, chain) %>% 
+  filter(n == max(n)) %>% 
+  filter(cdr3.len == min(cdr3.len))
+
+plot_logo_cluster <- function(.apl_recognition_cluster, .chain) {
+  df.for_logo.clusters %>% 
+    filter(apl_recognition_cluster == .apl_recognition_cluster,
+           chain == .chain) %>% 
+    .$cdr3 %>% 
+    ggseqlogo() +
+    theme(legend.position = "none") +
+    theme(axis.text.y = element_blank(),
+          axis.text.x = element_blank(),
+          axis.title.y = element_blank())
+}
+
+fig_s8_2 <- gridExtra::grid.arrange(grobs = list(plot_logo_cluster("C1", "a"), plot_logo_cluster("C1", "b"), 
+                                     plot_logo_cluster("C2", "a"), plot_logo_cluster("C2", "b"),
+                                     plot_logo_cluster("C3", "a"), plot_logo_cluster("C3", "b"), 
+                                     plot_logo_cluster("C4", "a"), plot_logo_cluster("C4", "b")), ncol = 2) 
+
+fig_s8_2
+```
+
+```{r, fig.width=11, fig.height=3.5}
+#png("figures/fig_s8.png", width = 11, height = 3.5, units = "in", res = 1000)
+ggdraw() +
+  draw_plot(fig_s8_1, x = 0, y = 0, width = .7, height = 1) +
+  draw_plot(fig_s8_2, x = .7, y = .2, width = .3, height = .75)
+#dev.off()
+```
+
+```{r}
+tcr_apl_recognition_class <- tcr_apl_recognition_cluster %>% 
+  mutate(apl_recognition_class = ifelse(apl_recognition_cluster %in% c("C1", "C2"), "Recognition_mut_p5/10/11",
+                ifelse(apl_recognition_cluster == "C3", "No_recognition_mut",
+                       ifelse(apl_recognition_cluster == "C4", "Recognition_mut_p6/11", NA))),
+         apl_recognition_class = factor(apl_recognition_class, 
+                                        levels = c("Recognition_mut_p5/10/11", "No_recognition_mut", "Recognition_mut_p6/11"))) %>% 
+  select(tcr_id, apl_recognition_class)
+```
+
+```{r}
+df.for_logo.clusters %>% 
+    merge(tcr_apl_recognition_class) %>% 
+  arrange(apl_recognition_class)
+```
+
+
+```{r, fig.width=3, fig.height=3.3}
+plot_logo_class <- function(.apl_recognition_class, .chain) {
+  df.for_logo.clusters %>% 
+    merge(tcr_apl_recognition_class) %>% 
+    filter(apl_recognition_class == .apl_recognition_class,
+           chain == .chain) %>% 
+    .$cdr3 %>% 
+    ggseqlogo() +
+    theme(legend.position = "none") +
+    theme(axis.text.y = element_blank(),
+          axis.text.x = element_blank(),
+          axis.title.y = element_blank())
+}
+
+logo_plots <- list(
+  plot_logo_class("Recognition_mut_p5/10/11", "a"),
+  plot_logo_class("Recognition_mut_p5/10/11", "b"),
+  plot_logo_class("No_recognition_mut", "a"),
+  plot_logo_class("No_recognition_mut", "b"),
+  plot_logo_class("Recognition_mut_p6/11", "a"),
+  plot_logo_class("Recognition_mut_p6/11", "b")
+) %>%
+  lapply(\(p) {
+    p + theme(
+      plot.margin = margin(0, 0, 0, 0, unit = "pt")
+    )
+  })
+
+fig_5d_motifs <- gridExtra::grid.arrange(
+  grobs = logo_plots,
+  ncol = 2,
+  padding = grid::unit(0, "pt")
+)
+
+#png("figures/fig_5d_motifs.png", width = 3, height = 3, units = "in", res = 1000)
+ggdraw() +
+  draw_plot(fig_5d_motifs, x = 0, y = 0, width = 1, height = 1)
+#dev.off()
+```
+
+```{r, fig.width=6.5, fig.height=9}
+levels_tcr_promiscuity <- tcr_promiscuity %>% arrange(n_recognized) %>% .$tcr_id
+
+fig_5d <- tcr_apl_scan %>% 
+  merge(tcr_apl_recognition_class) %>% 
+  ggplot(aes(x = apl_id, y = factor(tcr_id, levels = levels_tcr_promiscuity), fill = activation_pct)) +
+  geom_tile() +
+  scale_fill_continuous(expression("Activation (%NFAT-GFP"^"+"*")"), type = "viridis") +
+  xlab("") +
+  facet_grid(apl_recognition_class~"", scales = "free", space = "free") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 9),
+        legend.position = "bottom") +
+  xlab("APL") + ylab("TCR")
+
+#png("figures/fig_5d.png", width = 6.5, height = 9, units = "in", res = 1000)
+fig_5d
+#dev.off()
+```
+
+
+
+
+```{r}
+APL.matrix.binary <- tcr_apl_scan %>% 
+  select(tcr_id, apl_id, recognized_15pct) %>% 
+  dcast(tcr_id ~ apl_id) %>% 
+  column_to_rownames("tcr_id") 
+```
+
+
+```{r, fig.width=5, fig.height=2.5}
+apl_recall_facs <- fread("data/apl_recall_facs.tsv", sep = "\t")  %>% 
+  group_by(mouse_group) %>% 
+  mutate(group_mean_dby_recall = sum(pct_Dby_tet_pos * (peptide_recall == "Dby") / sum(peptide_recall == "Dby")),
+         pct_Dby_tet_pos_norm = pct_Dby_tet_pos / group_mean_dby_recall,
+         peptide_recall = factor(peptide_recall, levels = c("Dby", "5E", "6A", "6G", "11D")),
+         recall_immunogen = ifelse(grepl("male", mouse_id), "male cells", "peptide + IFA")) 
+
+fig_5k <- apl_recall_facs %>% 
+  ggplot(aes(x = peptide_recall, y = pct_Dby_tet_pos_norm, fill = mouse_type, shape = recall_immunogen)) +
+  ggbeeswarm::geom_quasirandom(width = .2, color = "black", stroke = 0.35, size = 1.5) +
+  facet_grid(~mouse_group, scale = "free_x", space = "free") +
+  scale_fill_manual(name = "Mouse group", values = c("B6" = "#0B1F3A", "MOCK" = "#1F77B4", "SOCS1" = "#D62728")) +
+  scale_shape_manual(name = "Recall immunogen", values = c("peptide + IFA" = 21, "male cells" = 23),
+                     breaks = c("peptide + IFA", "male cells")) +
+  ylab("Relative I-Aᵇ:Dby+ frequency\n(% of CD4+, norm. to Dby recall)") +  
+  xlab("Recall peptide") +
+  geom_hline(yintercept = .5, linetype = "dashed") +
+  theme_paper +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(0.25, "cm"),
+    legend.key.width  = unit(0.30, "cm"),
+    legend.spacing.y  = unit(0.02, "cm"),
+    legend.box.spacing = unit(0.05, "cm")
+  ) +
+  guides(
+    fill = guide_legend(
+      order = 1,
+      title = "Mouse group",
+      byrow = TRUE,
+      keyheight = unit(0.25, "cm"),
+      keywidth  = unit(0.30, "cm"),
+      label.theme = element_text(size = 7),
+      title.theme = element_text(size = 7),
+      override.aes = list(
+        shape = 21,
+        color = "black",
+        stroke = 0.35,
+        size = 2.2
+      )
+    ),
+    shape = guide_legend(
+      order = 2,
+      title = "Recall immunogen",
+      byrow = TRUE,
+      keyheight = unit(0.22, "cm"),
+      keywidth  = unit(0.30, "cm"),
+      label.theme = element_text(size = 7),
+      title.theme = element_text(size = 7),
+      override.aes = list(
+        fill = "white",
+        color = "black",
+        stroke = 0.35,
+        size = 2.2
+      )
+    )
+  )
+
+#png("figures/fig_5k.png", width = 5, height = 2.5, units = "in", res = 1000)
+fig_5k
+#dev.off()
+```
+
+```{r}
+apl_colors <- c(
+  "Dby" = "blue",
+  "5E"  = "#B8860B",
+  "6A"  = "#C51B8A",
+  "6G"  = "#E377C2",
+  "11D" = "#756BB1"
+)
+```
+
+```{r, fig.width=2.7, fig.height=2.3}
+tcr_repertoires_apl_b6_bulk <- fread("data/tcr_repertoires_apl_b6_bulk.tsv")
+
+fig_5j <- tcr_repertoires_apl_b6_bulk %>% 
+  filter(tcr_chain == "TCRa") %>% 
+  mutate(NNNN_motif = grepl("NNNN", CDR3)) %>% 
+  group_by(repertoire_group, mouse_type, peptide_recall, mouse_id) %>% 
+  summarise(NNNN_fraction = sum(NNNN_motif * freq)) %>% 
+  ggplot(aes(x = peptide_recall, y = 1 - NNNN_fraction, fill = peptide_recall)) +
+  ggbeeswarm::geom_quasirandom(shape = 21, color = "black", width = .3, stroke = 0.25) +
+  theme_paper +
+  scale_fill_manual("Recall peptide", values = apl_colors) +
+  theme(legend.position = "none") +
+  ylim(c(0,1)) +
+  xlab("Recall peptide") + ylab("Total fraction of TCRs w/o NNNN motif") +
+  ggtitle("Recognition_mut_p6/11")
+
+#png("figures/fig_5j.png", width = 2.7, height = 2.3, units = "in", res = 500)
+fig_5j
+#dev.off()
+```
+
+```{r, fig.width=4.5, fig.height=2.4}
+apl_rank_freq <- fread("data/tcr_repertoires_apl_b6_bulk.tsv") %>% 
+  merge(fread("data/apl_recall_facs.tsv")) %>% 
+  mutate(peptide_recall = factor(peptide_recall, levels = c("Dby", "5E", "6A", "6G", "11D"))) %>% 
+  filter(pct_Dby_tet_pos_norm > .5)
+
+fig_s7h <- apl_rank_freq %>% 
+  ggplot(aes(x = rank, y = freq, color = peptide_recall, group = mouse_id)) +
+  geom_line(linewidth = 0.4, alpha = 0.8) +
+  scale_x_log10() + scale_y_log10(breaks = c(1, 0.1, 0.01, 0.001), labels = c("1", "0.1", "0.01", "0.001")) +
+  xlab("Expansion rank") + ylab("Clonal frequency") +
+  facet_wrap(~tcr_chain, labeller = as_labeller(c("TCRa" = "TCRα", "TCRb" = "TCRβ"))) +
+  theme_paper +
+  scale_color_manual("Recall peptide", values = apl_colors) +
+  guides(colour = guide_legend(nrow = 1, byrow = TRUE, title.position = "left",
+                               override.aes = list(linewidth = 1.1, alpha = 1))) +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "bottom",
+    legend.title = element_text(size = 7, margin = margin(r = 5)),
+    legend.box.spacing = unit(1, "mm"),
+    legend.margin = margin(t = 1, b = 0),
+    legend.key.width = unit(8, "mm"),
+    panel.spacing.x = unit(5, "mm")
+  )
+
+#png("figures/fig_s7h.png", width = 4.5, height = 2.4, units = "in", res = 500)
+fig_s7h
+#dev.off()
+```
+
+```{r, fig.width=4.5, fig.height=2.4}
+fig_s7i <- apl_rank_freq %>% 
+  filter(rank == 1) %>% 
+  ggplot(aes(x = peptide_recall, y = freq, fill = peptide_recall)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  xlab("Recall peptide") + ylab("Frequency of most expanded clone") +
+  facet_wrap(~tcr_chain, labeller = as_labeller(c("TCRa" = "TCRα", "TCRb" = "TCRβ"))) +
+  scale_fill_manual("Recall peptide", values = apl_colors) +
+  theme(legend.position = "none")
+
+#png("figures/fig_s7i.png", width = 4.5, height = 2.4, units = "in", res = 500)
+fig_s7i
+#dev.off()
+```
+
+# P-TEAM coverage
+
+```{r, fig.width=1.6, fig.height=2.1}
+pteam_predictions <- fread("data/pteam_predictions.csv") %>% 
+  mutate(apl_id = paste0(mut_pos + 4, mut_ami)) %>% 
+  filter(apl_id %in% apl_metadata$apl_id) %>% 
+  mutate(CDR3a = gsub("-", "", cdr3a_aligned),
+         CDR3b = gsub("-", "", cdr3b_aligned)) %>% 
+  select(apl_id, CDR3a, CDR3b, prediction = class_score) %>% 
+  distinct()
+```
+
+```{r, fig.width=1.6, fig.height=2.1}
+tcr_repertoires_dby_sc <- fread("data/tcr_repertoires_dby_sc.tsv")
+
+max_act_rep_coverage <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO")) %>% 
+  merge(pteam_predictions, by = c("CDR3a", "CDR3b"), allow.cartesian = T) %>% 
+  filter(freq > .01) %>% 
+  group_by(repertoire_group, mouse_id, apl_id) %>% 
+  summarise(maximal_activation = max(prediction)) %>% 
+  group_by(repertoire_group, mouse_id) %>% 
+  summarise(max_act_rep_coverage = sum(maximal_activation > .15))
+
+freq_weight_act_rep_coverage <- tcr_repertoires_dby_sc %>% 
+  filter(repertoire_group %in% c("WT", "SOCS1-KO")) %>% 
+  merge(pteam_predictions, by = c("CDR3a", "CDR3b"), allow.cartesian = T) %>% 
+  group_by(repertoire_group, mouse_id, apl_id) %>% 
+  summarise(freq_weight_act = sum(freq * prediction) / sum(freq)) %>% 
+  group_by(repertoire_group, mouse_id) %>% 
+  summarise(freq_weight_act_rep_coverage = sum(freq_weight_act > .15))
+```
+
+```{r, fig.width=1.8, fig.height=2.1}
+fig_5g_1 <- max_act_rep_coverage %>% 
+  ggplot(aes(x = repertoire_group, y = max_act_rep_coverage, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Number of APLs \nwith predicted activation >15%") +
+  coord_cartesian(ylim = c(0, 31)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = 30, label.x = 1.3, method = "wilcox.test") +
+  ggtitle("Maximal-activation")
+
+fig_5g_2 <- freq_weight_act_rep_coverage %>% 
+  ggplot(aes(x = repertoire_group, y = freq_weight_act_rep_coverage, fill = repertoire_group)) +
+  add_median +
+  geom_quasirandom_paper +
+  theme_paper +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Number of APLs \nwith predicted activation >15%") +
+  coord_cartesian(ylim = c(0, 25)) +
+  scale_fill_mouse_type() +
+  scale_x_discrete(labels = socs1_label) + 
+  ggpubr::stat_compare_means(aes(label = after_stat(p_math(p))), parse = TRUE, size = 2.5, label.y = 24, label.x = 1.3, method = "wilcox.test") +
+  ggtitle("Frequency-weighted-activation") + 
+  theme(plot.title.position = "plot", plot.title = element_text(hjust = 1.3))
+
+#png("figures/fig_5g_1.png", width = 1.8, height = 2.1, units = "in", res = 500)
+fig_5g_1
+#dev.off()
+
+#png("figures/fig_5g_2.png", width = 1.8, height = 2.1, units = "in", res = 500)
+fig_5g_2
+#dev.off()
+```
+
+# Simulated in silico WT repertoires
+
+```{r}
+tcr_id_wt <- tcr_metadata %>% 
+  filter(repertoire_group == "WT") %>% 
+  .$tcr_id
+
+n_mouse_perm <- 1000
+n_TCR_perm <- 30
+```
+
+
+```{r}
+set.seed(1)
+
+rep_perm.TCR <- lapply(seq_len(n_mouse_perm), function(i) {
+  tibble(mouse.perm = i,
+         rank.perm = seq_len(n_TCR_perm),
+         tcr_id = sample(tcr_id_wt, size = n_TCR_perm, replace = FALSE))
+  }) %>% 
+  bind_rows()
+
+rep_perm.APL <- rep_perm.TCR %>% 
+  merge(tcr_apl_scan %>% 
+          filter(apl_id != "Dby") %>% 
+          select(tcr_id, apl_id, activation_pct)) %>% 
+  arrange(mouse.perm, apl_id, rank.perm) %>% 
+  group_by(mouse.perm, apl_id) %>% 
+  mutate(activation_pct.cum_max = cummax(activation_pct),
+         recognized_15pct.cum_max = activation_pct.cum_max > 15) %>% 
+  group_by(mouse.perm, rank.perm) %>% 
+  summarise(coverage.cum_max = sum(recognized_15pct.cum_max))
+```
+
+```{r}
+rep_perm.APL_summary <- rep_perm.APL %>%
+  group_by(rank.perm) %>%
+  summarise(
+    mean_y = mean(coverage.cum_max),
+    ci_lower = quantile(coverage.cum_max, 0.025),  # 2.5% quantile (lower bound)
+    ci_upper = quantile(coverage.cum_max, 0.975)   # 97.5% quantile (upper bound)
+  )
+```
+
+```{r, fig.width=2.5, fig.height=1.8}
+fig_5h <- rep_perm.APL_summary %>% 
+  ggplot() +
+  geom_line(aes(x = rank.perm, y = mean_y), size = 1, color = "#1F77B4") +  # average line
+  geom_ribbon(aes(x = rank.perm, ymin = ci_lower, ymax = ci_upper), alpha = 0.2, color = "white", fill = "#1F77B4") +  # error area
+  theme_paper +
+  theme(legend.position = "none") +
+  ggtitle("1000 in silico WT repertoires") +
+  xlab("Repertoire size (N TCRs)") + ylab("Repertoire coverage") +
+  #geom_vline(xintercept = 4, linetype = "dashed", color = "#D62728") +
+  geom_vline(xintercept = 6, linetype = "dashed", color = "#D62728") +
+  #geom_vline(xintercept = 11, linetype = "dashed", color = "#1F77B4") #+
+  geom_vline(xintercept = 20, linetype = "dashed", color = "#1F77B4")
+
+#png("figures/fig_5h.png", width = 2.5, height = 1.8, units = "in", res = 1000)
+fig_5h
+#dev.off()
+```

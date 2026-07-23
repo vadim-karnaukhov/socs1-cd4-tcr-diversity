@@ -1,0 +1,563 @@
+---
+title: "Mathematical model of CD4+ T cell response"
+author: Vadim Karnaukhov
+output: html_document
+date: "2026-07-18"
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(parallel)
+library(ggbeeswarm)
+
+source(here::here("R", "plotting_functions.R"))
+```
+
+# Hyperparameters
+
+```{r}
+n_clones <- 100
+time_max <- 100
+death_rate <- 0.01
+grazing_rate <- 0.001
+pMHC_degradation_rate <- 0.02
+```
+
+# Function for running the simulation
+
+```{r}
+run_simulation <- function(
+    seed,
+    meanlog = -4,
+    sdlog = 2.5,
+    k_s = 5e-4,
+    time_max = 100,
+    tau_crit = 1,
+    dt = 1
+) {
+
+  message("Run seed ", seed)
+  set.seed(seed)
+
+  # Generate TCR repertoire with n_clones, each with distinct TCR dwell time
+  clones <- tibble(clone = paste0("clone_", seq_len(n_clones)),
+                   tau = stats::rlnorm(n = n_clones, meanlog = meanlog, sdlog = sdlog))
+
+  # Probability of productive TCR triggering
+  A <- exp(-tau_crit / clones$tau)
+
+
+  # ------------------------------------------------------------------
+  # Helper function for one simulation condition
+  # ------------------------------------------------------------------
+
+  simulate_condition <- function(with_inhibition) {
+
+    # T_i(0) = 1 for all recruited clones.
+    clone_size <- matrix(0, nrow = n_clones, ncol = time_max)
+    clone_size[, 1] <- 1
+
+    # S_i(0) = 0.
+    inhibition <- matrix(0, nrow = n_clones, ncol = time_max)
+
+    # C_APC(0) = 1.
+    APC <- numeric(time_max)
+    APC[1] <- 1
+
+    for (t in 2:time_max) {
+
+      # All rates over this interval are evaluated from the state at the preceding time point: t - 1.
+      old_size <- clone_size[, t - 1]
+      old_S <- inhibition[, t - 1]
+      old_APC <- APC[t - 1]
+
+      total_T <- sum(old_size)
+
+      if (with_inhibition) {
+        inhibition_factor <- pmax(0, 1 - old_S)
+      } else {
+        inhibition_factor <- rep(1, n_clones)
+      }
+
+      # Per-cell proliferation rate:
+      # A_i * C_APC(t) * max(0, 1 - S_i(t))
+      proliferation_rate <- A * old_APC * inhibition_factor
+
+      # Gross production of new cells before subtracting cell death.
+      # This is the quantity used as a proxy for productive APC
+      # encounters in the pMHC-grazing equation.
+      gross_proliferation <- sum(old_size * proliferation_rate)
+
+      # Explicit Euler update of clone abundance:
+      # dT_i/dt = T_i * (proliferation_rate_i - death_rate)
+      new_size <- old_size + dt * old_size * (proliferation_rate - death_rate)
+
+      # Prevent negative expected cell numbers if an Euler step
+      # overshoots below zero.
+      clone_size[, t] <- pmax(0, new_size)
+
+      # Explicit Euler update of the inhibitory signal:
+      # dS_i/dt = k_s * tau_i * sum_j T_j
+      if (with_inhibition) {
+        inhibition[, t] <- old_S + dt * k_s * clones$tau * total_T
+      } else {
+        inhibition[, t] <- 0
+      }
+
+      # Explicit Euler update of APC-presented pMHC:
+      # dC_APC/dt =
+      #   -g * gross_proliferation
+      #   -gamma * C_APC
+      new_APC <- old_APC + dt * (-grazing_rate * gross_proliferation - pMHC_degradation_rate * old_APC)
+
+      APC[t] <- max(0, new_APC)
+    }
+
+    list(
+      clone_size = clone_size,
+      inhibition = inhibition,
+      APC = APC
+    )
+  }
+
+
+  # ------------------------------------------------------------------
+  # Run WT and no-inhibition simulations with the same TCR repertoire
+  # ------------------------------------------------------------------
+
+  simulation_WT <- simulate_condition(with_inhibition = TRUE)
+
+  simulation_no_inhibition <-
+    simulate_condition(with_inhibition = FALSE)
+
+
+  # ------------------------------------------------------------------
+  # Convert simulation matrices to a long-format data frame
+  # ------------------------------------------------------------------
+
+  prepare_results <- function(simulation, condition) {
+  
+  simulation$clone_size %>%
+      as.data.frame() %>%
+      mutate(clone = clones$clone) %>%
+      pivot_longer(cols = -clone,
+                 names_to = "time",
+                 names_prefix = "V",
+                 names_transform = list(time = as.integer),
+                 values_to = "n") %>%
+      mutate(time = time - 1,
+           S = as.vector(t(simulation$inhibition)),
+           APC = simulation$APC[time + 1],
+           type = condition,
+           seed = seed) %>%
+      left_join(clones, by = "clone")
+}
+
+
+results <- bind_rows(prepare_results(simulation_WT, "WT"),
+                     prepare_results(simulation_no_inhibition, "no inhibition")) %>%
+  mutate(meanlog = meanlog,
+         sdlog = sdlog,
+         k_s = k_s,
+         tau_crit = tau_crit,
+         dt = dt)
+
+  return(results)
+}
+```
+
+# Grid search for parameters
+
+```{r}
+run_grid_search_peak <- function(
+    number_of_seeds = 5,
+    simulation_time = 50,
+    n_cores = 5
+) {
+  
+  parameters_grid <- tidyr::expand_grid(
+    seed = seq_len(number_of_seeds),
+    meanlog = seq(-8, -2),
+    sdlog = seq(1.5, 4.5, 0.5),
+    k_s = c(5e-5, 7.5e-5, 1e-4, 2.5e-4, 5e-4)
+  )
+  
+  wrapped_fun <- function(i) {
+    
+    pars <- parameters_grid[i, ]
+    
+    simulation <- run_simulation(
+      seed = pars$seed[[1]],
+      meanlog = pars$meanlog[[1]],
+      sdlog = pars$sdlog[[1]],
+      k_s = pars$k_s[[1]],
+      time_max = simulation_time
+    )
+    
+    peak_times <- simulation %>%
+      group_by(type, time) %>%
+      summarise(
+        total_n = sum(n),
+        .groups = "drop"
+      ) %>%
+      group_by(type) %>%
+      slice_max(
+        order_by = total_n,
+        n = 1,
+        with_ties = FALSE
+      ) %>%
+      ungroup() %>%
+      transmute(
+        type,
+        peak_time = time,
+        peak_total_n = total_n,
+        peak_at_boundary = peak_time == (simulation_time - 1)
+      )
+    
+    simulation %>%
+      inner_join(
+        peak_times,
+        by = "type"
+      ) %>%
+      filter(time == peak_time)
+  }
+  
+  results_list <- parallel::mclapply(
+    X = seq_len(nrow(parameters_grid)),
+    FUN = wrapped_fun,
+    mc.cores = n_cores
+  )
+  
+  data.table::rbindlist(
+    results_list,
+    use.names = TRUE,
+    fill = TRUE
+  )
+}
+
+peak_results <- run_grid_search_peak(
+  number_of_seeds = 100,
+  simulation_time = 100,
+  n_cores = 5
+)
+```
+
+```{r}
+peak_results %>% 
+  distinct(meanlog, sdlog, k_s, seed, peak_time, peak_total_n) %>% 
+  filter(peak_time != 0) %>% 
+  .$peak_time %>% qplot()
+```
+
+```{r}
+peak_results.top_1 <- peak_results %>% 
+  group_by(type, seed, meanlog, sdlog, k_s, peak_time) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  filter(freq == max(freq)) %>% 
+  distinct(type, seed, meanlog, sdlog, k_s, peak_time, .keep_all = T) %>% 
+  group_by(type, meanlog, sdlog, k_s) %>% 
+  summarise(freq_top1_median = median(freq), 
+            n_top1_median = median(n),
+            peak_time_median = median(peak_time),
+            .groups = "drop")
+
+fitted_parameters <- peak_results.top_1 %>% 
+  filter(type == "WT",
+         freq_top1_median > .15, freq_top1_median < .17) %>% 
+  select(meanlog, sdlog, k_s)
+```
+
+
+```{r, fig.width=6, fig.height=2}
+ks_math <- function(x) {
+  vapply(x, function(v) {
+    exponent <- floor(log10(v))
+    coefficient <- signif(v / 10^exponent, 2)
+    sprintf("k[s] == %s %%*%% 10^{%d}", coefficient, exponent)
+  }, character(1))
+}
+
+fig_s3a <- peak_results.top_1 %>% 
+  filter(type == "WT") %>% 
+  merge(fitted_parameters %>% 
+          mutate(fitted = T), all = T) %>% 
+  mutate(fitted = replace_na(fitted, F)) %>% 
+  arrange(fitted) %>% 
+  mutate(k_s_label = factor(ks_math(k_s), levels = ks_math(sort(unique(peak_results.top_1$k_s))))) %>% 
+  ggplot(aes(x = meanlog, y = sdlog, fill = freq_top1_median)) +
+  geom_tile(aes(color = fitted), size = .8) +
+  facet_wrap(~k_s_label, labeller = label_parsed, nrow = 1) +
+  theme_paper +
+  scale_fill_viridis_c("Median frequency of \nmost expanded clone", option = "H") +
+  scale_color_manual(values = c("black", "cyan")) + 
+  theme(legend.position = "bottom",
+        legend.margin = margin(0, 0, 0, 0),
+        legend.box.margin = margin(-4, 0, 0, 0),
+        legend.spacing.y = unit(0, "pt"),
+        aspect.ratio = 1) + 
+  guides(color = "none",
+         fill = guide_colourbar(title.position = "left", title.hjust = 0.5, barwidth = unit(30, "mm"), barheight = unit(2, "mm"))) +
+  labs(x = expression(mu), y = expression(sigma))
+
+#png("figures/fig_s3a.png", width = 6, height = 2, units = "in", res = 1000)
+fig_s3a
+#dev.off()
+```
+
+```{r, fig.width=2.4, fig.height=2.4}
+ks_levels <- c(5e-5, 7.5e-5, 1e-4, 2.5e-4, 5e-4)
+
+ks_labels <- expression(
+  5 %*% 10^{-5},
+  7.5 %*% 10^{-5},
+  1 %*% 10^{-4},
+  2.5 %*% 10^{-4},
+  5 %*% 10^{-4}
+)
+
+fig_s3b_2 <- peak_results.top_1 %>% 
+  mutate(k_s = factor(k_s, levels = ks_levels)) %>% 
+  dcast(meanlog + sdlog + k_s ~ type, value.var = "freq_top1_median") %>% 
+  filter(WT != 0.01) %>% 
+  ggplot(aes(x = WT, y = `no inhibition`, color = k_s)) +
+  geom_point(size = .6) +
+  geom_abline(slope = 1, yintercept = 0, linetype = "dashed", linewidth = .4) +
+  scale_color_manual(name = expression(k[s]), values = c("grey80", "grey60", "grey40", "grey20", "black"),
+                     labels = ks_labels, drop = FALSE, guide = guide_legend(override.aes = list(size = 1.5), keyheight = unit(0.25, "cm"))) +
+  theme_paper +
+  xlim(c(0, 1)) + ylim(c(0,1)) +
+  theme(aspect.ratio = 1) +
+  ggtitle("Median frequency of most expanded clone \nSimulation") +
+  xlab("WT") + ylab("No inhibition") +
+  theme(
+    legend.key.height = unit(0.25, "cm"),
+    legend.key.width = unit(0.25, "cm"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(2, "pt"),
+    legend.title = element_text(
+      margin = margin(b = 1)
+    ),
+    legend.text = element_text(
+      margin = margin(0, 0, 0, 0)
+    )
+  )
+
+#png("figures/fig_s3b_2.png", width = 2.4, height = 2.4, units = "in", res = 500)
+fig_s3b_2
+#dev.off()
+```
+
+```{r}
+parameters_to_plot <- tibble(
+  meanlog = c(-2, -4, -3, -5, -5),
+  sdlog = c(1.5, 3.0, 2.0, 3.0, 2.5),
+  k_s = c(5e-05, 7.5e-05, 1e-04, 2.5e-04, 5e-04)
+)
+```
+
+```{r, fig.width=7, fig.height=2.7}
+freq_thr = .001
+
+tau_math <- function(meanlog, sdlog) {
+  sprintf(
+    "log(tau[i])~'~'~N(mu==%s, sigma==%s)",
+    formatC(meanlog, format = "fg", digits = 3),
+    formatC(sdlog,  format = "fg", digits = 3)
+  )
+}
+
+peak_results.ranks <- peak_results %>% 
+  merge(parameters_to_plot) %>% 
+  group_by(type, meanlog, sdlog, k_s, seed, time) %>% 
+  arrange(type, meanlog, sdlog, k_s, seed, time, -n) %>% 
+  mutate(rank = rank(-n),
+         rank.plot = row_number(),
+         frequency = n / sum(n)) %>% 
+  mutate(k_s_label = factor(ks_math(k_s), levels = ks_math(sort(unique(peak_results.top_1$k_s)))),
+         tau_label = tau_math(meanlog, sdlog)) %>% 
+  mutate(type = factor(type, levels = c("WT", "no inhibition"))) 
+
+results_fit.peak.stats <- peak_results.ranks %>% 
+  group_by(type, meanlog, sdlog, k_s_label, tau_label, rank.plot) %>% 
+  summarise(
+    mean_freq = mean(frequency),
+    sd_freq = sd(frequency),
+    .groups = "drop"
+  ) %>% 
+  rowwise() %>% 
+  mutate(ymin = max(freq_thr, mean_freq - sd_freq),
+         ymax = mean_freq + sd_freq) %>% 
+  filter(mean_freq >= freq_thr)
+
+
+fig_s3b <- results_fit.peak.stats %>% 
+  ggplot() +
+  geom_ribbon(aes(x = rank.plot, ymin = ymin, ymax = ymax, fill = type), alpha = 0.2) +
+  geom_line(aes(x = rank.plot, y = mean_freq, color = type), size = 1.2) +
+  theme_paper +
+  theme_rank_freq +
+  scale_x_log10(limits = c(1,20)) + scale_y_log10(limits = c(freq_thr, 1)) +
+  facet_wrap(vars(k_s_label, tau_label), labeller = labeller(.default = label_parsed, .multi_line = TRUE), scales = "free_x", nrow = 1) +
+  theme(legend.position = "bottom",
+        aspect.ratio = 1) +
+  scale_color_manual("Simulation", values = c("#1F77B4", "#D62728")) +
+  scale_fill_manual("Simulation", values = c("#1F77B4", "#D62728")) +
+  xlab("Expansion rank")+ ylab("Clonal frequency") 
+
+#png("figures/fig_s3b.png", width = 7, height = 2.7, units = "in", res = 1000)
+fig_s3b
+#dev.off()
+```
+
+
+```{r, fig.width=7, fig.height=2.3}
+fig_s3c <- peak_results.ranks %>% 
+  filter(rank.plot == 1) %>% 
+  merge(parameters_to_plot) %>% 
+  ggplot(aes(x = type, y = frequency)) +
+  geom_violin(aes(fill = type)) +
+  geom_boxplot(width = .1, outlier.shape = NA) +
+  facet_wrap(vars(k_s_label, tau_label), labeller = labeller(.default = label_parsed, .multi_line = TRUE), scales = "free_x", nrow = 1) +
+  theme_paper +
+  scale_fill_manual(values = c("#1F77B4", "#D62728")) +
+  theme(legend.position = "none") +
+  xlab("") + ylab("Frequency of most expanded clone")
+
+#png("figures/fig_s3c.png", width = 7, height = 2.3, units = "in", res = 1000)
+fig_s3c
+#dev.off()
+```
+
+```{r, fig.width=2.1, fig.height=2.1}
+simulations_selected <- peak_results.ranks %>%
+  filter(meanlog == -5, sdlog == 3, k_s == 2.5e-04,
+         seed <= 50) %>% 
+  filter(n >= 1) %>% 
+  mutate(group = paste0(type, "_", seed))
+
+fig_3e <- simulations_selected %>% 
+  mutate(group = factor(group, levels = sample(unique(simulations_selected$group)))) %>% 
+  arrange(group, rank) %>% 
+  slice_sample(prop = 1) %>% 
+  ggplot(aes(x = rank, y = frequency, group = group, color = type)) +
+  geom_line(alpha = .4, linewidth = .3) +
+  scale_x_log10(limits = c(1,25)) + scale_y_log10(breaks = c(1, 0.1, 0.01, 0.001), labels = c("1", "0.1", "0.01", "0.001")) +
+  theme_paper +
+  xlab("Expansion rank") + ylab("Clonal frequency") +
+  scale_color_manual(values = c("#1F77B4", "#D62728")) +
+  guides(color = guide_legend(title = NULL)) +
+  theme(
+    aspect.ratio = 1,
+    legend.position = c(.7, .9),
+    legend.key = element_blank(),
+    legend.title = element_blank(),
+    legend.margin     = margin(1, 1, 1, 1),        # top, right, bottom, left (in pts)
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.key.height = unit(0.6, "lines"),     # reduce legend line height
+    legend.spacing.y = unit(0, "lines")  # tighten vertical space
+  )
+
+#png("figures/fig_3e.png", width = 2.1, height = 2.1, units = "in", res = 1000)
+fig_3e
+#dev.off()
+```
+
+
+```{r, fig.width=5, fig.height=2.2}
+selected_seeds <- c(4,5,6,20,23)
+
+fig_4a <- simulations_selected %>% 
+  filter(seed %in% selected_seeds,
+         rank.plot <= 10) %>%
+  mutate(seed_plot = factor(seed, levels = selected_seeds, labels = 1:5),
+         label = paste0(type, " ", seed_plot),
+         label = factor(label, levels = c(paste("WT", c(1:5)), paste("no inhibition", c(1:5))))) %>% 
+  ggplot(aes(x = 1/tau, y = rank.plot, fill = type)) +
+  geom_point(shape = 21, color = "black", width = .1, stroke = 0.25, size = .9) +
+  facet_wrap(~label, ncol = 5, scale = "free") +
+  scale_x_log10() +
+  ylab("Expansion rank") + xlab(expression(1/tau)) +
+  scale_y_continuous(breaks = c(1, 4, 7, 10)) +
+  scale_fill_manual(values = c("#1F77B4", "#D62728")) +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+#png("figures/fig_4a.png", width = 5, height = 2.2, units = "in", res = 1000)
+fig_4a
+#dev.off()
+```
+
+```{r}
+simulations_plot <- lapply(c(1:100), function(x) {run_simulation(seed = x, meanlog = -5, sdlog = 3, k_s = 2.5e-04)}) %>% 
+  rbindlist()
+
+simulations_plot
+```
+
+```{r, fig.width=3.5, fig.height=2.5}
+#png("~/curie/socs1/figures/model_totalTcells_time.png", width = 3.5, height = 2.5, units = "in", res = 1000)
+fig_3c <- simulations_plot %>% 
+  mutate(type = factor(type, levels = c("WT", "no inhibition"))) %>% 
+  group_by(time, seed, type) %>% 
+  summarise(n = sum(n)) %>% 
+  mutate(label = paste0(type, seed)) %>% 
+  filter(n >= 100) %>% 
+  ggplot(aes(x = time, y = n, group = label, color = type)) +
+  geom_line(alpha = .4, linewidth = .3) +
+  scale_y_log10() +
+  xlim(c(0,75)) +
+  theme_classic() +
+  #ylab("log (Total number of T cells)") +
+  ylab("Total number of T cells") +
+  theme(legend.position = c(.8, .95),
+        legend.key = element_blank(),
+        legend.title = element_blank(),
+        #legend.margin     = margin(1, 1, 1, 1),        # top, right, bottom, left (in pts)
+        #legend.box.margin = margin(0, 0, 0, 0),
+        legend.key.height = unit(0.6, "lines"),     # reduce legend line height
+        legend.spacing.y = unit(0, "lines"),  # tighten vertical space
+        legend.text = element_text(size = 9),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  #scale_color_manual("", values = c("#1F77B4", "#D62728"), labels = c("WT", expression(SOCS1^KO))) +
+  scale_color_manual("", values = c("#1F77B4", "#D62728"), labels = c("WT", "no inhibition")) +
+  geom_vline(xintercept = 14, linetype = "dotted")
+
+#png("figures/fig_3c.png", width = 3.5, height = 2.5, units = "in", res = 1000)
+fig_3c
+#dev.off()
+```
+
+```{r, fig.width=3.5, fig.height=2.5}
+fig_3d <- simulations_plot %>% 
+  mutate(type = factor(type, levels = c("WT", "no inhibition"))) %>% 
+  distinct(time, type, seed, APC) %>% 
+  mutate(label = paste0(type, seed)) %>% 
+  ggplot(aes(x = time, y = APC, group = label, color = type)) +
+  geom_line(alpha = .4, linewidth = .3) +
+  xlim(c(0,75)) +
+  theme_classic() +
+  #ylab("log (Total number of T cells)") +
+  ylab("pMHC presented by APCs") +
+  theme(legend.position = c(.8, .95),
+        legend.key = element_blank(),
+        legend.title = element_blank(),
+        #legend.margin     = margin(1, 1, 1, 1),        # top, right, bottom, left (in pts)
+        #legend.box.margin = margin(0, 0, 0, 0),
+        legend.key.height = unit(0.6, "lines"),     # reduce legend line height
+        legend.spacing.y = unit(0, "lines"),  # tighten vertical space
+        legend.text = element_text(size = 9),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  #scale_color_manual("", values = c("#1F77B4", "#D62728"), labels = c("WT", expression(SOCS1^KO))) +
+  scale_color_manual("", values = c("#1F77B4", "#D62728"), labels = c("WT", "no inhibition")) +
+  geom_vline(xintercept = 14, linetype = "dotted")
+
+#png("figures/fig_3d.png", width = 3.5, height = 2.5, units = "in", res = 1000)
+fig_3d
+#dev.off()
+```
+

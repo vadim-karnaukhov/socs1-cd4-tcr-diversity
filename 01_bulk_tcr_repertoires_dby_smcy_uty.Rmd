@@ -1,0 +1,92 @@
+---
+title: "Analysis of bulk TCR-sequencing from Dby-, Smcy- and Uty-specific repertoires"
+author: Vadim Karnaukhov
+output: html_document
+date: "2026-07-18"
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(parallel)
+library(ggbeeswarm)
+library(scales)
+
+source(here::here("R", "plotting_functions.R"))
+```
+
+
+```{r}
+tcr_repertoires_dby_smcy_uty <- fread("data/tcr_repertoires_dby_smcy_uty.tsv")
+```
+
+```{r, fig.width=2.5, fig.height=2.5}
+scale_color_dby_smcy_uty <- scale_color_manual(name = NULL, breaks = c("Dby-CD4", "Smcy-CD8", "Uty-CD8"),
+                                               values = c("Dby-CD4"  = "blue", "Smcy-CD8" = "#0CB702", "Uty-CD8"  = "orange"),
+                                               labels = c(expression("Dby-"*plain(CD4)^"+"), expression("Smcy-"*plain(CD8)^"+"), expression("Uty-"*plain(CD8)^"+")))
+
+fig_s1b <- tcr_repertoires_dby_smcy_uty %>% 
+  filter(tcr_chain == "TCRa") %>% 
+  ggplot(aes(x = rank, y = freq, group = sample_id, color = specificity))  +
+  plot_rank_freq +
+  scale_color_dby_smcy_uty +
+  ggtitle(expression(TCR*alpha))
+
+fig_1e <- tcr_repertoires_dby_smcy_uty %>% 
+  filter(tcr_chain == "TCRb") %>% 
+  ggplot(aes(x = rank, y = freq, group = sample_id, color = specificity)) +
+  plot_rank_freq +
+  ggtitle(expression(TCR*beta))
+
+#png("figures/fig_s1b.png", width = 2.5, height = 2.5, units = "in", res = 500)
+fig_s1b
+#dev.off()
+
+#png("figures/fig_1e.png", width = 2.5, height = 2.5, units = "in", res = 500)
+fig_1e
+#dev.off()
+```
+```{r, fig.width=4, fig.height=2.25}
+facet_labels <- c(
+  "Dby-CD4"  = "'Dby-CD4'^'+'",
+  "Smcy-CD8" = "'Smcy-CD8'^'+'",
+  "Uty-CD8"  = "'Uty-CD8'^'+'"
+)
+
+plot_top1_bulk <- function(df) {
+  df %>% 
+    ggplot(aes(x = type_response, y = freq, fill = type_response)) +
+    stat_summary(fun = "median", geom = "crossbar", width = 0.5, color = "black", size = .2) +
+    geom_quasirandom(shape = 21, width = .1) +
+    facet_wrap(~specificity,
+               labeller = labeller(specificity = as_labeller(facet_labels, default = label_parsed))) +
+    theme_classic() +
+    scale_fill_manual("", values = c("#FF1493", "#8A2BE2")) +
+    ggpubr::stat_compare_means(label = "p.format", size = 2.5, label.y = .95, label.x = 1.2) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_paper +
+    theme(legend.position = "none") +
+    xlab("") + ylab("Frequency of most expanded clone") 
+    
+}
+
+fig_s1c <- tcr_repertoires_dby_smcy_uty %>% 
+  filter(tcr_chain == "TCRa",
+         rank == 1) %>% 
+  plot_top1_bulk() +
+  ggtitle(expression(TCR*alpha))
+
+fig_1f <- tcr_repertoires_dby_smcy_uty %>% 
+  filter(tcr_chain == "TCRb",
+         rank == 1) %>% 
+  plot_top1_bulk() +
+  ggtitle(expression(TCR*beta))
+
+#png("figures/fig_s1c.png", width = 4, height = 2.25, units = "in", res = 500)
+fig_s1c
+#dev.off()
+
+#png("figures/fig_1f.png", width = 4, height = 2.25, units = "in", res = 500)
+fig_1f
+#dev.off()
+```

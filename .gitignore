@@ -1,0 +1,25 @@
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+
+# RStudio local files
+.Rproj.user/
+
+# macOS
+.DS_Store
+
+# R Markdown generated files
+*_cache/
+*_files/
+*.html
+*.utf8.md
+*.knit.md
+
+# Input data are hosted separately
+data/*
+!data/README.md
+
+# Generated outputs
+results/
+figures/
