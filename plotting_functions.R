@@ -40,8 +40,8 @@ theme_rank_freq <- list(
 plot_rank_freq <- list(
   geom_line(alpha = .7, linewidth = .4),
   scale_x_log10(),
-  scale_y_log10(labels = trans_format("log10", math_format(10^.x)),
-                breaks = trans_breaks("log10", function(x) 10^x, n = 5)),
+  scale_y_log10(labels = scales::trans_format("log10", math_format(10^.x)),
+                breaks = scales::trans_breaks("log10", function(x) 10^x, n = 5)),
   theme_classic(),
   theme(aspect.ratio = 1),
   theme(legend.position = c(.8, .9),

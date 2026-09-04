@@ -10,7 +10,7 @@ library(tidyverse)
 library(data.table)
 library(ggbeeswarm)
 
-source(here::here("R", "plotting_functions.R"))
+source(here::here("plotting_functions.R"))
 ```
 
 ```{r}

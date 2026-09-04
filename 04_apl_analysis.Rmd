@@ -13,7 +13,7 @@ library(magrittr)
 library(ggseqlogo)
 library(cowplot)
 
-source(here::here("R", "plotting_functions.R"))
+source(here::here("plotting_functions.R"))
 ```
 
 
